@@ -1,363 +1,141 @@
-#include <iostream>
-#include <thread>
-#include <chrono>
-#include <random>
-#include <string>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <windows.h>
-#include <signal.h>
-#include <Psapi.h>
-#include <shellapi.h>
-#include <shlwapi.h>
-#include <cstdio>
+#include "Config.h"
 
-#include "core/Config.h"
-#include "core/Globals.h"
-#include "core/ConfigManager.h"
-#include "security/LicenseManager.h"
-#include "input/HardwareInjector.h"
-#include "input/SimulatedMouseInjector.h"
-#include "input/IMouseInjector.h"
-#include "network/WebServer.h"
-#include "capture/CaptureLoop.h"
-#include "capture/ColorDetector.h"
-#include "input/MouseMove.h"
-#include "util/SystemUtils.h"
-#include "util/DynamicApi.h"
-
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "psapi.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "shlwapi.lib")
-
-std::atomic<bool> g_shutdown_requested{ false };
-std::condition_variable g_shutdown_cv;
-std::mutex g_shutdown_mutex;
-
-std::unique_ptr<IMouseInjector> g_injector;  // global injector pointer
-
-void requestShutdown() {
-    g_shutdown_requested = true;
-    g_shutdown_cv.notify_one();
-}
-
-static std::mt19937 mt{ std::random_device{}() };
-
-BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
-    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT || ctrlType == CTRL_CLOSE_EVENT) {
-        ConfigManager::rotateLog("Shutting down cleanly...");
-        requestShutdown();
-        return TRUE;
-    }
-    return FALSE;
-}
-
-int get_random_int(int min, int max) {
-    std::uniform_int_distribution<int> dist{ min, max };
-    return dist(mt);
-}
-
-static int ComputeFreshTimeoutMs() {
-    int refresh = MonitorInfo::GetRefreshRate();
-    if (refresh <= 0) refresh = 60;
-    int t = (2 * 1000 / refresh) + 2;
-    if (t < 6) t = 6;
-    return t;
-}
-
-static bool WaitForFreshCapture(uint64_t seqBefore, int timeoutMs,
-    const int& coordsX, const int& coordsY,
-    int& outX, int& outY)
+namespace cfg
 {
-    auto start = std::chrono::high_resolution_clock::now();
-    while (true) {
-        uint64_t curSeq = capture_seq.load(std::memory_order_acquire);
-        if (curSeq != seqBefore) {
-            int x = coordsX;
-            int y = coordsY;
-            if (x != 0 || y != 0) {
-                outX = x;
-                outY = y;
-                return true;
-            }
-            seqBefore = curSeq;
-        }
-        auto now = std::chrono::high_resolution_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() >= timeoutMs) {
-            outX = 0;
-            outY = 0;
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-}
+    int color_mode = 0;
 
-static bool IsGameForeground() { return true; }
+    bool apply_delta_ativo = true;
+    int apply_deltakey1 = VK_XBUTTON1;
+    int apply_deltakey2 = VK_SHIFT;
+    int target_offset_x = 1;
+    int target_offset_y = 5;
+    int apply_delta_fov = 82;
+    float apply_delta_smooth = 1.4f;
+    float speed = 0.4f;
+    int sleep = 0;
 
-void mode_a() {
-    if (dynamic_api::pSetThreadPriority)
-        dynamic_api::pSetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    bool key_was_down = false;
-    auto lastFireTime = std::chrono::high_resolution_clock::now();
-    constexpr auto DEBOUNCE = std::chrono::milliseconds(20);
-    const int FRESH_TIMEOUT_MS = ComputeFreshTimeoutMs();
+    bool apply_deltaassist_ativo = false;
+    int assist_apply_deltakey = VK_MENU;
+    int assist_target_offset_x = 2;
+    int assist_target_offset_y = 3;
+    int apply_deltaassist_fov = 1;
+    float apply_deltaassist_smooth = 1.5f;
+    float assist_speed = 1.0f;
+    int assist_sleep = 0;
 
-    while (true) {
-        if (cfg::mode_a_ativo) {
-            bool key_is_down = false;
-            if (dynamic_api::pGetAsyncKeyState)
-                key_is_down = dynamic_api::pGetAsyncKeyState(cfg::mode_a_key) & 0x8000;
-            else
-                key_is_down = GetAsyncKeyState(cfg::mode_a_key) & 0x8000;
-            auto now = std::chrono::high_resolution_clock::now();
-            if (key_is_down && !key_was_down && (now - lastFireTime) > DEBOUNCE) {
-                if (!IsGameForeground()) {
-                    key_was_down = key_is_down;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    continue;
-                }
-                uint64_t seqBefore = capture_seq.load(std::memory_order_acquire);
-                int mx = mode_a_x;
-                int my = mode_a_y;
-                if (mx == 0 && my == 0) {
-                    WaitForFreshCapture(seqBefore, FRESH_TIMEOUT_MS, mode_a_x, mode_a_y, mx, my);
-                    if (mx == 0 && my == 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                        mx = mode_a_x;
-                        my = mode_a_y;
-                    }
-                }
-                if (mx != 0 || my != 0) {
-                    SnapShoot_P(mx, my);
-                    lastFireTime = std::chrono::high_resolution_clock::now();
-                }
-            }
-            key_was_down = key_is_down;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
+    bool nonmode_a_ativo = false;
+    int nonmode_a_key = VK_XBUTTON2;
+    int nonmode_a_fov = 100;
+    int nonmode_a_delay_between_shots = 1;
+    float nonmode_a_distance = 2.5f;
 
-void nonmode_a() {
-    if (dynamic_api::pSetThreadPriority)
-        dynamic_api::pSetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    bool key_was_down = false;
-    auto lastFireTime = std::chrono::high_resolution_clock::now();
-    constexpr auto DEBOUNCE = std::chrono::milliseconds(20);
-    const int FRESH_TIMEOUT_MS = ComputeFreshTimeoutMs();
+    bool mode_a_ativo = true;
+    int mode_a_key = VK_XBUTTON2;
+    int mode_a_target_offset_x = 0;
+    int mode_a_target_offset_y = 3;
+    int mode_a_fov = 100;
+    int mode_a_delay_between_shots = 1;
+    float distance = 2.62f;
+    bool mode_a_head_targeting = true;
+    int mode_a_cooldown_ms = 50;
 
-    while (true) {
-        if (cfg::nonmode_a_ativo) {
-            bool key_is_down = false;
-            if (dynamic_api::pGetAsyncKeyState)
-                key_is_down = dynamic_api::pGetAsyncKeyState(cfg::nonmode_a_key) & 0x8000;
-            else
-                key_is_down = GetAsyncKeyState(cfg::nonmode_a_key) & 0x8000;
-            auto now = std::chrono::high_resolution_clock::now();
-            if (key_is_down && !key_was_down && (now - lastFireTime) > DEBOUNCE) {
-                if (!IsGameForeground()) {
-                    key_was_down = key_is_down;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    continue;
-                }
-                uint64_t seqBefore = capture_seq.load(std::memory_order_acquire);
-                int mx = nonmode_a_x;
-                int my = nonmode_a_y;
-                if (mx == 0 && my == 0) {
-                    WaitForFreshCapture(seqBefore, FRESH_TIMEOUT_MS, nonmode_a_x, nonmode_a_y, mx, my);
-                    if (mx == 0 && my == 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                        mx = nonmode_a_x;
-                        my = nonmode_a_y;
-                    }
-                }
-                if (mx != 0 || my != 0) {
-                    SnapShoot_F(mx, my);
-                    lastFireTime = std::chrono::high_resolution_clock::now();
-                }
-            }
-            key_was_down = key_is_down;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
+    bool useIstrigFilter = true;
 
-bool IsAdmin() {
-    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
-    PSID AdminGroup;
-    BOOL bResult = AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdminGroup);
-    if (!bResult) return false;
-    BOOL isAdmin = FALSE;
-    bResult = CheckTokenMembership(NULL, AdminGroup, &isAdmin);
-    FreeSid(AdminGroup);
-    return bResult && isAdmin;
-}
+    bool trigger_action_ativo = true;
+    int trigger_action_key = VK_MENU;
+    int trigger_action_delay = 1;
+    int trigger_action_fovX = 3;
+    int trigger_action_fovY = 3;
 
-static void InitFOV() {
-    int best = 0;
-    if (cfg::apply_delta_ativo && cfg::apply_delta_fov > best) best = cfg::apply_delta_fov;
-    if (cfg::apply_deltaassist_ativo && cfg::apply_deltaassist_fov > best) best = cfg::apply_deltaassist_fov;
-    if (cfg::mode_a_ativo && cfg::mode_a_fov > best) best = cfg::mode_a_fov;
-    if (cfg::nonmode_a_ativo && cfg::nonmode_a_fov > best) best = cfg::nonmode_a_fov;
-    if (best <= 0) best = 200;
-    std::lock_guard<std::mutex> lock(fovMutex);
-    currentFOV = best;
-}
+    int menorRGB[3] = { 70, 0, 120 };
+    int maiorRGB[3] = { 255, 190, 255 };
+    int menorHSV[3] = { 270, 38, 40 };
+    int maiorHSV[3] = { 310, 100, 100 };
 
-static void OpenWebUIInEdge() {
-    const char* url = "http://localhost:13548/";
-    char edgePath[MAX_PATH] = {0};
-    HKEY hKey;
+    int ngrok = 1;
+    bool use_gpu_processing = false;
+    bool dead_body_filter = false;
+    int dead_body_threshold = 15;
+    int min_cluster_size = 2;
+    bool trigger_polygon_check = true;
+    bool apply_delta_dist_smoothing = true;
+    int apply_delta_near_dist = 10;
+    int apply_delta_mid_dist = 30;
+    float apply_delta_near_mult = 0.4f;
+    float apply_delta_mid_mult = 0.7f;
 
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                      "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe",
-                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD type = REG_SZ;
-        DWORD pathLen = sizeof(edgePath);
-        if (RegQueryValueExA(hKey, NULL, NULL, &type, (LPBYTE)edgePath, &pathLen) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-            std::string cmd = std::string("\"") + edgePath + "\" --new-window --app=" + url;
-            STARTUPINFOA si = {};
-            PROCESS_INFORMATION pi = {};
-            si.cb = sizeof(si);
-            if (CreateProcessA(NULL, const_cast<char*>(cmd.c_str()), NULL, NULL, FALSE,
-                               CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                return;
-            }
-        } else {
-            RegCloseKey(hKey);
-        }
-    }
+    bool head_anchor_proportional = true;
+    int head_anchor_band_rows = 0;
+    int head_anchor_gap_tolerance = 2;
+    int head_anchor_close_pct = 18;
+    int head_anchor_mid_pct = 10;
+    int head_anchor_close_min_h = 30;
+    int head_anchor_mid_min_h = 10;
 
-    const char* fallbackPaths[] = {
-        "C:\\Program Files (x86)\\Microsoft Edge\\Application\\msedge.exe",
-        "C:\\Program Files\\Microsoft Edge\\Application\\msedge.exe"
-    };
-    for (const char* path : fallbackPaths) {
-        if (PathFileExistsA(path)) {
-            std::string cmd = std::string("\"") + path + "\" --new-window --app=" + url;
-            STARTUPINFOA si = {};
-            PROCESS_INFORMATION pi = {};
-            si.cb = sizeof(si);
-            if (CreateProcessA(NULL, const_cast<char*>(cmd.c_str()), NULL, NULL, FALSE,
-                               CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                return;
-            }
-        }
-    }
+    // Humanisation
+    bool sim_enable_humanization = true;
+    int sim_jitter_min_us = 100;
+    int sim_jitter_max_us = 300;
+    int sim_substeps_mode = 0;
+    int sim_click_hold_min_ms = 20;
+    int sim_click_hold_max_ms = 67;
+    int sim_snapback_delay_us = 0;
 
-    ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL);
-}
+    float sim_overshoot_percent = 0.10f;
+    int sim_pre_delay_min_ms = 20;
+    int sim_pre_delay_max_ms = 60;
+    int sim_deadzone_pixels = 2;
+    int sim_easing_mode = 1;
 
-int main() {
-    try {
-        AllocConsole();
-        FILE* fDummy;
-        freopen_s(&fDummy, "CONOUT$", "w", stdout);
-        freopen_s(&fDummy, "CONOUT$", "w", stderr);
-        std::cout << "[DEBUG] Console attached." << std::endl;
+    int click_burst_limit = 15;
+    int click_gap_base_ms = 120;
+    int click_gap_jitter_ms = 100;
+    int click_gap_floor_ms = 80;
+    int click_scatter_percent = 40;
+    float click_ln_mu = 4.3f;
+    float click_ln_sigma = 0.35f;
+    int click_press_min_ms = 50;
+    int click_press_max_ms = 200;
+    float click_double_chance = 1.5f;
+    int click_double_min_ms = 30;
+    int click_double_max_ms = 80;
 
-        std::cout << "[DEBUG] Initializing dynamic API..." << std::endl;
-        bool apiInitSuccess = dynamic_api::Initialize();
-        std::cout << "[DEBUG] Dynamic API init result: " << (apiInitSuccess ? "SUCCESS" : "FAILED") << std::endl;
+    int drift_step_ms = 3;
+    int drift_max_ms = 15;
+    int drift_interval_s = 15;
+    int drift_interval_jitter_s = 16;
 
-        SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
-        ConfigManager::rotateLog("Coloruino started.");
-        std::cout << "[DEBUG] Coloruino started." << std::endl;
+    int reaction_hesit_min_ms = 60;
+    int reaction_hesit_max_ms = 140;
+    int reaction_hesit_percent = 1;
+    int reaction_cd_jitter_percent = 10;
+    int reaction_refr_low = 4;
+    int reaction_refr_high = 8;
+    int reaction_low_dly_min = 15;
+    int reaction_low_dly_max = 45;
+    int reaction_hi_dly_min = 40;
+    int reaction_hi_dly_max = 120;
+    int reaction_reset_after_ms = 500;
 
-        if (!apiInitSuccess) {
-            ConfigManager::rotateLog("WARNING: Dynamic API initialization partially failed. Some functions may not be available.");
-            std::cout << "[WARN] Dynamic API initialization partially failed." << std::endl;
-        }
+    bool hitbox_detection_enabled = true;
+    int hitbox_ray_length = 100;
+    bool hitbox_use_three_rays = true;
+    bool hitbox_anti_below = true;
 
-        if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
-            SetProcessDPIAware();
-            std::cout << "[DEBUG] Set DPI awareness fallback." << std::endl;
-        }
+    bool short_stop_enabled = true;
+    int short_stop_chance = 5;
+    int short_stop_min_ms = 10;
+    int short_stop_max_ms = 200;
+    int short_stop_mode = 1;
+    float short_stop_slow_min = 1.0f;
+    float short_stop_slow_max = 3.0f;
 
-        std::cout << "[DEBUG] Loading config..." << std::endl;
-        if (!ConfigManager::loadConfig()) {
-            std::cout << "[WARN] Config load failed or file missing, using defaults." << std::endl;
-        } else {
-            std::cout << "[DEBUG] Config loaded." << std::endl;
-        }
+    bool track_delay_enabled = true;
+    int track_delay_min_ms = 0;
+    int track_delay_max_ms = 200;
 
-        std::cout << "[DEBUG] Initializing HardwareInjector..." << std::endl;
-        auto hardwareInjector = std::make_unique<HardwareInjector>();
-        if (hardwareInjector->Connect()) {
-            g_injector = std::move(hardwareInjector);
-            std::cout << "[DEBUG] HardwareInjector connected successfully." << std::endl;
-            // Set initial cooldown from config
-            g_injector->SetCooldown(cfg::mode_a_cooldown_ms);
-        } else {
-            std::cout << "[ERROR] HardwareInjector connection failed. Exiting." << std::endl;
-            ConfigManager::rotateLog("ERROR: HardwareInjector connection failed.");
-            // Optional: fallback to SimulatedMouseInjector for testing
-            // g_injector = std::make_unique<SimulatedMouseInjector>();
-            // std::cout << "[WARN] Falling back to SimulatedMouseInjector." << std::endl;
-            return -1;
-        }
+    bool aofi_enabled = true;
+    int aofi_reset_timeout_ms = 2000;
 
-        std::cout << "[DEBUG] Setting process priority and timer resolution..." << std::endl;
-        set_process_priority(HIGH_PRIORITY_CLASS);
-        set_timer_resolution();
-        std::cout << "[DEBUG] Done." << std::endl;
-
-        Width = GetSystemMetrics(SM_CXSCREEN);
-        Height = GetSystemMetrics(SM_CYSCREEN);
-        std::cout << "[DEBUG] Screen resolution: " << Width << "x" << Height << std::endl;
-
-        std::cout << "[DEBUG] Initializing FOV..." << std::endl;
-        InitFOV();
-        std::cout << "[DEBUG] FOV init complete." << std::endl;
-
-        std::cout << "[DEBUG] Starting capture thread..." << std::endl;
-        std::thread(CaptureScreen).detach();
-        std::cout << "[DEBUG] Starting silent aim thread..." << std::endl;
-        std::thread(mode_a).detach();
-        std::cout << "[DEBUG] Starting flicker thread..." << std::endl;
-        std::thread(nonmode_a).detach();
-        std::cout << "[DEBUG] All threads started." << std::endl;
-
-        std::cout << "[DEBUG] Calling initializeNetworking(13548)..." << std::endl;
-        initializeNetworking(13548);
-        std::cout << "[DEBUG] initializeNetworking returned." << std::endl;
-
-        std::cout << "[DEBUG] Waiting 1 second for server to start..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        std::cout << "[DEBUG] Opening WebUI in Edge..." << std::endl;
-        OpenWebUIInEdge();
-        std::cout << "[DEBUG] WebUI open call complete." << std::endl;
-
-        std::cout << "[DEBUG] Waiting for shutdown signal..." << std::endl;
-        {
-            std::unique_lock<std::mutex> lock(g_shutdown_mutex);
-            g_shutdown_cv.wait(lock, [] { return g_shutdown_requested.load(); });
-        }
-
-        ConfigManager::rotateLog("Shutting down...");
-        std::cout << "[DEBUG] Shutting down." << std::endl;
-
-        std::cout << "[DEBUG] Press Enter to exit..." << std::endl;
-        std::cin.get();
-    }
-    catch (const std::exception& e) {
-        std::cout << "[FATAL] Exception: " << e.what() << std::endl;
-        ConfigManager::rotateLog(std::string("FATAL: ") + e.what());
-        std::cout << "[DEBUG] Press Enter to exit..." << std::endl;
-        std::cin.get();
-    }
-    catch (...) {
-        std::cout << "[FATAL] Unknown exception." << std::endl;
-        ConfigManager::rotateLog("FATAL: Unknown exception");
-        std::cout << "[DEBUG] Press Enter to exit..." << std::endl;
-        std::cin.get();
-    }
-    return 0;
+    bool apply_delta_toggle = false;
 }
