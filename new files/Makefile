@@ -1,74 +1,51 @@
-# Makefile for tfirm firmware (LUFA + MAX3421E + Passthrough)
-# Target: Arduino Leonardo (ATmega32U4) with USB Host Shield
-# Uses LUFA library (in lufa/ subdirectory)
+/*
+ * HardwareInjector.h
+ * Hardware-based mouse injection via HID Feature Reports (USB).
+ * Communicates with the Arduino running tfirm firmware (PRO X 2 spoof).
+ * Uses Interface 2, Report ID 0x10 to send movement and cooldown commands.
+ */
 
-# Compiler and toolchain
-MCU          = atmega32u4
-ARCH         = AVR8
-F_CPU        = 16000000
-F_USB        = 16000000
-OPTIMIZATION = s
-TARGET       = MousePassthrough
-SRC          = $(TARGET).c Descriptors.c max3421e.c $(LUFA_SRC)
-LUFA_PATH    = lufa/LUFA
-CC           = avr-gcc
-OBJCOPY      = avr-objcopy
-OBJDUMP      = avr-objdump
-SIZE         = avr-size
-AVRDUDE      = avrdude_bin/avrdude.exe
+#pragma once
 
-# LUFA source files (minimal set)
-LUFA_SRC = \
-	$(LUFA_PATH)/Drivers/USB/Core/AVR8/Device_AVR8.c \
-	$(LUFA_PATH)/Drivers/USB/Core/AVR8/Endpoint_AVR8.c \
-	$(LUFA_PATH)/Drivers/USB/Core/AVR8/Host_AVR8.c \
-	$(LUFA_PATH)/Drivers/USB/Core/AVR8/Pipe_AVR8.c \
-	$(LUFA_PATH)/Drivers/USB/Core/AVR8/USBController_AVR8.c \
-	$(LUFA_PATH)/Drivers/USB/Core/AVR8/USBInterrupt_AVR8.c \
-	$(LUFA_PATH)/Drivers/USB/Core/ConfigDescriptors.c \
-	$(LUFA_PATH)/Drivers/USB/Core/DeviceStandardReq.c \
-	$(LUFA_PATH)/Drivers/USB/Core/Events.c \
-	$(LUFA_PATH)/Drivers/USB/Core/HostStandardReq.c \
-	$(LUFA_PATH)/Drivers/USB/Core/USBTask.c
+#include "IMouseInjector.h"
+#include <string>
+#include <windows.h>
+#include <setupapi.h>
+#include <hidsdi.h>
 
-# Compiler flags
-CFLAGS = -mmcu=$(MCU) -DF_CPU=$(F_CPU)UL -DF_USB=$(F_USB)UL \
-         -Os -fno-move-loop-invariants -fno-tree-scev-cprop \
-         -fno-inline-small-functions -fno-tree-reassoc \
-         -fno-tree-loop-optimize -fno-tree-switch-conversion \
-         -fno-math-errno -fno-split-wide-types \
-         -Wall -Wextra -Werror -Wno-unused-parameter \
-         -ffunction-sections -fdata-sections \
-         -I. -I$(LUFA_PATH)/.. \
-         -DUSE_LUFA_CONFIG_HEADER \
-         -DARCH=ARCH_$(ARCH) \
-         -DUSB_VID=0x046D -DUSB_PID=0xC09B
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "hid.lib")
 
-LDFLAGS = -mmcu=$(MCU) -Wl,-Map=$(TARGET).map,--cref -Wl,--relax -Wl,--gc-sections
+class HardwareInjector : public IMouseInjector {
+public:
+    HardwareInjector();
+    ~HardwareInjector() override;
 
-# Default target
-all: $(TARGET).hex
+    // Try to open the device. Returns true on success.
+    bool Connect();
 
-# Compile C files
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+    // IMouseInjector implementation
+    void Move(int dx, int dy) override;
+    void Click() override;   // Not used in hardware mode (firmware handles click via P/F)
+    void SilentAim(int dx, int dy) override;
+    void Flick(int dx, int dy) override;
+    void SetCooldown(int ms) override;
 
-# Link
-$(TARGET).elf: $(SRC:.c=.o)
-	$(CC) $(LDFLAGS) $^ -o $@
-	$(SIZE) $@
+    // Check if device is currently connected
+    bool IsConnected() const { return m_handle != INVALID_HANDLE_VALUE; }
 
-# Generate hex
-$(TARGET).hex: $(TARGET).elf
-	$(OBJCOPY) -O ihex -R .eeprom $< $@
+private:
+    HANDLE m_handle;
+    static constexpr WORD TARGET_VID = 0x046D;
+    static constexpr WORD TARGET_PID = 0xC09B;
+    static constexpr BYTE REPORT_ID = 0x10;
+    static constexpr size_t REPORT_SIZE = 7;  // 1 byte ID + 6 bytes payload
 
-# Flash (requires avrdude and PORT specified)
-flash: $(TARGET).hex
-	$(AVRDUDE) -p $(MCU) -P $(PORT) -c avr109 -U flash:w:$(TARGET).hex:i
+    // Send a raw HID feature report (SET_REPORT via IOCTL)
+    bool SendReport(const BYTE* report, size_t len);
 
-# Clean
-clean:
-	rm -f *.o *.elf *.hex *.map
-
-# Dependencies
-$(SRC:.c=.o): $(LUFA_PATH)/Drivers/USB/USB.h
+    // Internal command helpers
+    void SendCommand(BYTE cmd, const BYTE* data, size_t dataLen);
+    void SendMovement(int16_t dx, int16_t dy);
+    void SendCooldown(uint16_t ms);
+};
